@@ -384,6 +384,10 @@ namespace Mono.Cecil.Cil {
 				// resolve by walking the instructions from start and don't cache the result.
 				int size = 0;
 				for (int i = 0; i < items.Length; i++) {
+					if (items [i] == null) {
+						continue;
+					}
+
 					if (size == offset)
 						return new InstructionOffset (items [i]);
 
@@ -399,6 +403,10 @@ namespace Mono.Cecil.Cil {
 				// The offset points after the current cache position - so continue counting and update the cache
 				int size = cache.Offset;
 				for (int i = cache.Index; i < items.Length; i++) {
+					if (items [i] == null) {
+						continue;
+					}
+
 					cache.Index = i;
 					cache.Offset = size;
 					cache.Instruction = items [i];
