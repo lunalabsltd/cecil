@@ -91,7 +91,7 @@ namespace Mono.Cecil {
 
 			module.MetadataSystem.Clear ();
 
-			if (module.symbol_reader != null)
+			if (module.symbol_reader != null && !parameters.KeepSymbolReader)
 				module.symbol_reader.Dispose ();
 
 			var name = module.assembly != null ? module.assembly.Name : null;

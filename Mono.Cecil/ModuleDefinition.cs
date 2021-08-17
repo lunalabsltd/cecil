@@ -181,6 +181,7 @@ namespace Mono.Cecil {
 
 		uint? timestamp;
 		Stream symbol_stream;
+		bool keep_symbol_reader;
 		ISymbolWriterProvider symbol_writer_provider;
 		bool write_symbols;
 		byte [] key_blob;
@@ -195,6 +196,11 @@ namespace Mono.Cecil {
 		public Stream SymbolStream {
 			get { return symbol_stream; }
 			set { symbol_stream = value; }
+		}
+
+		public bool KeepSymbolReader {
+			get { return keep_symbol_reader; }
+			set { keep_symbol_reader = value; }
 		}
 
 		public ISymbolWriterProvider SymbolWriterProvider {
