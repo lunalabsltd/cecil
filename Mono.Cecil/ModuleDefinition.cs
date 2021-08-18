@@ -1133,6 +1133,13 @@ namespace Mono.Cecil {
 				parameters);
 		}
 
+		public void ReadSymbols (ReaderParameters parameters)
+		{
+			symbol_reader?.Dispose ();
+			symbol_reader = null;
+			ModuleReader.ReadSymbols (this, parameters);
+		}
+
 		public void Write (string fileName)
 		{
 			Write (fileName, new WriterParameters ());
