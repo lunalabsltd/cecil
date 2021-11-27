@@ -89,7 +89,7 @@ namespace Mono.Cecil {
 			return module;
 		}
 
-		static void ReadSymbols (ModuleDefinition module, ReaderParameters parameters)
+		internal static void ReadSymbols (ModuleDefinition module, ReaderParameters parameters)
 		{
 			var symbol_reader_provider = parameters.SymbolReaderProvider;
 
