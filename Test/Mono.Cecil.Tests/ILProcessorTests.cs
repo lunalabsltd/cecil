@@ -5,6 +5,7 @@ using System.Linq;
 
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Mdb;
 using Mono.Cecil.Pdb;
 using NUnit.Framework;
 
@@ -38,6 +39,67 @@ namespace Mono.Cecil.Tests {
 				il.Create (OpCodes.Ldloc_1));
 
 			AssertOpCodeSequence (new [] { OpCodes.Ldloc_0, OpCodes.Ldloc_1, OpCodes.Ldloc_2, OpCodes.Ldloc_3 }, method);
+		}
+
+		[Test]
+		public void InsertBeforeIssue697 ()
+		{
+			var parameters = new ReaderParameters { SymbolReaderProvider = new MdbReaderProvider () };
+			using (var module = GetResourceModule ("Issue697.dll", parameters))
+			{
+				var pathGetterDef = module.GetTypes ()
+					.SelectMany (t => t.Methods)
+					.First (m => m.Name.Equals ("get_Defer"));
+
+				var body = pathGetterDef.Body;
+				var worker = body.GetILProcessor ();
+				var initialBody = body.Instructions.ToList ();
+				var head = initialBody.First ();
+				var opcode = worker.Create (OpCodes.Ldc_I4_1);
+				worker.InsertBefore (head, opcode);
+				worker.InsertBefore (head, worker.Create (OpCodes.Ret));
+				initialBody.ForEach (worker.Remove);
+				AssertOpCodeSequence (new [] { OpCodes.Ldc_I4_1, OpCodes.Ret }, pathGetterDef.body);	
+			}
+		}
+
+		[Test]
+		public void InsertBeforeIssue697bis ()
+		{
+			var parameters = new ReaderParameters { SymbolReaderProvider = new MdbReaderProvider () };
+			using (var module = GetResourceModule ("Issue697.dll", parameters)) {
+				var pathGetterDef = module.GetTypes ()
+					.SelectMany (t => t.Methods)
+					.First (m => m.Name.Equals ("get_Defer"));
+
+				var body = pathGetterDef.Body;
+				var worker = body.GetILProcessor ();
+				var initialBody = body.Instructions.ToList ();
+				Console.WriteLine (initialBody.Sum (i => i.GetSize ()));
+
+				var head = initialBody.First ();
+				var opcode = worker.Create (OpCodes.Ldc_I4_1);
+				worker.InsertBefore (head, opcode);
+
+				Assert.That (pathGetterDef.DebugInformation.Scope.Start.IsEndOfMethod, Is.False);
+				foreach (var subscope in pathGetterDef.DebugInformation.Scope.Scopes)
+					Assert.That (subscope.Start.IsEndOfMethod, Is.False);
+
+				// big test -- we can write w/o crashing
+				var unique = Guid.NewGuid ().ToString ();
+				var output = Path.GetTempFileName ();
+				var outputdll = output + ".dll";
+
+				var writer = new WriterParameters () {
+					SymbolWriterProvider = new MdbWriterProvider (),
+					WriteSymbols = true
+				};
+				using (var sink = File.Open (outputdll, FileMode.Create, FileAccess.ReadWrite)) {
+					module.Write (sink, writer);
+				}
+
+				Assert.Pass ();
+			}
 		}
 
 		[Test]
@@ -90,16 +152,18 @@ namespace Mono.Cecil.Tests {
 			AssertOpCodeSequence (new OpCode[] { }, method);
 		}
 
-		[TestCase (RoundtripType.None, false, false)]
-		[TestCase (RoundtripType.Pdb, false, false)]
-		[TestCase (RoundtripType.Pdb, true, false)]
-		[TestCase (RoundtripType.Pdb, true, true)]
-		[TestCase (RoundtripType.PortablePdb, false, false)]
-		[TestCase (RoundtripType.PortablePdb, true, false)]
-		[TestCase (RoundtripType.PortablePdb, true, true)]
-		public void InsertAfterWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes)
+		[TestCase (RoundtripType.None, false, false, false)]
+		[TestCase (RoundtripType.Pdb, false, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, true)]
+		[TestCase (RoundtripType.Pdb, true, true, false)]
+		[TestCase (RoundtripType.PortablePdb, false, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, true)]
+		[TestCase (RoundtripType.PortablePdb, true, true, false)]
+		public void InsertAfterWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes, bool padIL)
 		{
-			var methodBody = CreateTestMethodWithLocalScopes ();
+			var methodBody = CreateTestMethodWithLocalScopes (padIL);
 			methodBody = RoundtripMethodBody (methodBody, roundtripType, forceUnresolved, reverseScopes);
 
 			var il = methodBody.GetILProcessor ();
@@ -114,16 +178,18 @@ namespace Mono.Cecil.Tests {
 			methodBody.Method.Module.Dispose ();
 		}
 
-		[TestCase (RoundtripType.None, false, false)]
-		[TestCase (RoundtripType.Pdb, false, false)]
-		[TestCase (RoundtripType.Pdb, true, false)]
-		[TestCase (RoundtripType.Pdb, true, true)]
-		[TestCase (RoundtripType.PortablePdb, false, false)]
-		[TestCase (RoundtripType.PortablePdb, true, false)]
-		[TestCase (RoundtripType.PortablePdb, true, true)]
-		public void RemoveWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes)
+		[TestCase (RoundtripType.None, false, false, false)]
+		[TestCase (RoundtripType.Pdb, false, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, true)]
+		[TestCase (RoundtripType.Pdb, true, true, false)]
+		[TestCase (RoundtripType.PortablePdb, false, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, true)]
+		[TestCase (RoundtripType.PortablePdb, true, true, false)]
+		public void RemoveWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes, bool padIL)
 		{
-			var methodBody = CreateTestMethodWithLocalScopes ();
+			var methodBody = CreateTestMethodWithLocalScopes (padIL);
 			methodBody = RoundtripMethodBody (methodBody, roundtripType, forceUnresolved, reverseScopes);
 
 			var il = methodBody.GetILProcessor ();
@@ -138,16 +204,18 @@ namespace Mono.Cecil.Tests {
 			methodBody.Method.Module.Dispose ();
 		}
 
-		[TestCase (RoundtripType.None, false, false)]
-		[TestCase (RoundtripType.Pdb, false, false)]
-		[TestCase (RoundtripType.Pdb, true, false)]
-		[TestCase (RoundtripType.Pdb, true, true)]
-		[TestCase (RoundtripType.PortablePdb, false, false)]
-		[TestCase (RoundtripType.PortablePdb, true, false)]
-		[TestCase (RoundtripType.PortablePdb, true, true)]
-		public void ReplaceWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes)
+		[TestCase (RoundtripType.None, false, false, false)]
+		[TestCase (RoundtripType.Pdb, false, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, true)]
+		[TestCase (RoundtripType.Pdb, true, true, false)]
+		[TestCase (RoundtripType.PortablePdb, false, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, true)]
+		[TestCase (RoundtripType.PortablePdb, true, true, false)]
+		public void ReplaceWithSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes, bool padIL)
 		{
-			var methodBody = CreateTestMethodWithLocalScopes ();
+			var methodBody = CreateTestMethodWithLocalScopes (padIL);
 			methodBody = RoundtripMethodBody (methodBody, roundtripType, forceUnresolved, reverseScopes);
 
 			var il = methodBody.GetILProcessor ();
@@ -162,16 +230,18 @@ namespace Mono.Cecil.Tests {
 			methodBody.Method.Module.Dispose ();
 		}
 
-		[TestCase (RoundtripType.None, false, false)]
-		[TestCase (RoundtripType.Pdb, false, false)]
-		[TestCase (RoundtripType.Pdb, true, false)]
-		[TestCase (RoundtripType.Pdb, true, true)]
-		[TestCase (RoundtripType.PortablePdb, false, false)]
-		[TestCase (RoundtripType.PortablePdb, true, false)]
-		[TestCase (RoundtripType.PortablePdb, true, true)]
-		public void EditBodyWithScopesAndSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes)
+		[TestCase (RoundtripType.None, false, false, false)]
+		[TestCase (RoundtripType.Pdb, false, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, false)]
+		[TestCase (RoundtripType.Pdb, true, false, true)]
+		[TestCase (RoundtripType.Pdb, true, true, false)]
+		[TestCase (RoundtripType.PortablePdb, false, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, false)]
+		[TestCase (RoundtripType.PortablePdb, true, false, true)]
+		[TestCase (RoundtripType.PortablePdb, true, true, false)]
+		public void EditBodyWithScopesAndSymbolRoundtrip (RoundtripType roundtripType, bool forceUnresolved, bool reverseScopes, bool padIL)
 		{
-			var methodBody = CreateTestMethodWithLocalScopes ();
+			var methodBody = CreateTestMethodWithLocalScopes (padIL);
 			methodBody = RoundtripMethodBody (methodBody, roundtripType, forceUnresolved, reverseScopes);
 
 			var il = methodBody.GetILProcessor ();
@@ -258,13 +328,16 @@ namespace Mono.Cecil.Tests {
 				Assert.IsTrue (scope.End.IsEndOfMethod);
 		}
 
-		static MethodBody CreateTestMethodWithLocalScopes ()
+		static MethodBody CreateTestMethodWithLocalScopes (bool padILWithNulls)
 		{
 			var module = ModuleDefinition.CreateModule ("TestILProcessor", ModuleKind.Dll);
 			var type = new TypeDefinition ("NS", "TestType", TypeAttributes.Public | TypeAttributes.Abstract | TypeAttributes.Sealed, module.ImportReference (typeof (object)));
 			module.Types.Add (type);
 
 			var methodBody = CreateTestMethod (OpCodes.Nop, OpCodes.Ldloc_0, OpCodes.Nop, OpCodes.Ldloc_1, OpCodes.Nop, OpCodes.Ldloc_2, OpCodes.Nop);
+			if (padILWithNulls)
+				methodBody.Instructions.Capacity += 10;
+
 			var method = methodBody.Method;
 			method.ReturnType = module.ImportReference (typeof (void));
 			type.Methods.Add (method);

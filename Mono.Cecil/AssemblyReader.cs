@@ -182,7 +182,7 @@ namespace Mono.Cecil {
 			ReadCustomAttributes (module);
 
 			var assembly = module.Assembly;
-			if (assembly == null)
+			if (module.kind == ModuleKind.NetModule || assembly == null)
 				return;
 
 			ReadCustomAttributes (assembly);
@@ -419,7 +419,7 @@ namespace Mono.Cecil {
 			for (int i = 0; i < methods.Count; i++) {
 				var method = methods [i];
 
-				if (method.HasBody && method.token.RID != 0 && (method.debug_info == null || !method.debug_info.HasSequencePoints))
+				if (method.HasBody && method.token.RID != 0 && method.debug_info == null)
 					method.debug_info = symbol_reader.Read (method);
 			}
 		}
@@ -667,8 +667,10 @@ namespace Mono.Cecil {
 					AssemblyResolver = module.AssemblyResolver
 				};
 
-				modules.Add (ModuleDefinition.ReadModule (
-					GetModuleFileName (name), parameters));
+				var netmodule = ModuleDefinition.ReadModule (GetModuleFileName (name), parameters);
+				netmodule.assembly = this.module.assembly;
+
+				modules.Add (netmodule);
 			}
 
 			return modules;
@@ -3003,7 +3005,9 @@ namespace Mono.Cecil {
 
 			object value;
 			if (type.etype == ElementType.String) {
-				if (signature.buffer [signature.position] != 0xff) {
+				if (!signature.CanReadMore ())
+					value = "";
+				else if (signature.buffer [signature.position] != 0xff) {
 					var bytes = signature.ReadBytes ((int) (signature.sig_length - (signature.position - signature.start)));
 					value = Encoding.Unicode.GetString (bytes, 0, bytes.Length);
 				} else
@@ -3013,7 +3017,7 @@ namespace Mono.Cecil {
 				value = new decimal (signature.ReadInt32 (), signature.ReadInt32 (), signature.ReadInt32 (), (b & 0x80) != 0, (byte) (b & 0x7f));
 			} else if (type.IsTypeOf ("System", "DateTime")) {
 				value = new DateTime (signature.ReadInt64());
-			} else if (type.etype == ElementType.Object || type.etype == ElementType.None || type.etype == ElementType.Class || type.etype == ElementType.Array) {
+			} else if (type.etype == ElementType.Object || type.etype == ElementType.None || type.etype == ElementType.Class || type.etype == ElementType.Array || type.etype == ElementType.GenericInst) {
 				value = null;
 			} else
 				value = signature.ReadConstantSignature (type.etype);
@@ -3221,28 +3225,7 @@ namespace Mono.Cecil {
 
 					infos.Add (async_body);
 				} else if (rows [i].Col1 == EmbeddedSourceDebugInformation.KindIdentifier) {
-					var signature = ReadSignature (rows [i].Col2);
-					var format = signature.ReadInt32 ();
-					var length = signature.sig_length - 4;
-
-					var info = null as CustomDebugInformation;
-
-					if (format == 0) {
-						info = new EmbeddedSourceDebugInformation (signature.ReadBytes ((int) length), compress: false);
-					} else if (format > 0) {
-						var compressed_stream = new MemoryStream (signature.ReadBytes ((int) length));
-						var decompressed_document = new byte [format]; // if positive, format is the decompressed length of the document
-						var decompressed_stream = new MemoryStream (decompressed_document);
-
-						using (var deflate_stream = new DeflateStream (compressed_stream, CompressionMode.Decompress, leaveOpen: true))
-							deflate_stream.CopyTo (decompressed_stream);
-
-						info = new EmbeddedSourceDebugInformation (decompressed_document, compress: true);
-					} else if (format < 0) {
-						info = new BinaryCustomDebugInformation (rows [i].Col1, ReadBlob (rows [i].Col2));
-					}
-
-					infos.Add (info);
+					infos.Add (new EmbeddedSourceDebugInformation (rows [i].Col2, this));
 				} else if (rows [i].Col1 == SourceLinkDebugInformation.KindIdentifier) {
 					infos.Add (new SourceLinkDebugInformation (Encoding.UTF8.GetString (ReadBlob (rows [i].Col2))));
 				} else {
@@ -3253,6 +3236,33 @@ namespace Mono.Cecil {
 			}
 
 			return infos;
+		}
+
+		public byte [] ReadRawEmbeddedSourceDebugInformation (uint index)
+		{
+			var signature = ReadSignature (index);
+			return signature.ReadBytes ((int) signature.sig_length);
+		}
+
+		public Row<byte [], bool> ReadEmbeddedSourceDebugInformation (uint index)
+		{
+			var signature = ReadSignature (index);
+			var format = signature.ReadInt32 ();
+			var length = signature.sig_length - 4;
+
+			if (format == 0) {
+				return new Row<byte [], bool> (signature.ReadBytes ((int) length), false);
+			} else if (format > 0) {
+				var compressed_stream = new MemoryStream (signature.ReadBytes ((int) length));
+				var decompressed_document = new byte [format]; // if positive, format is the decompressed length of the document
+				var decompressed_stream = new MemoryStream (decompressed_document);
+
+				using (var deflate_stream = new DeflateStream (compressed_stream, CompressionMode.Decompress, leaveOpen: true))
+					deflate_stream.CopyTo (decompressed_stream);
+
+				return new Row<byte [], bool> (decompressed_document, true);
+			} else
+				throw new NotSupportedException ();
 		}
 	}
 
@@ -3588,6 +3598,12 @@ namespace Mono.Cecil {
 		object ReadCustomAttributeElementValue (TypeReference type)
 		{
 			var etype = type.etype;
+			if (etype == ElementType.GenericInst) {
+				// The only way to get a generic here is that it's an enum on a generic type
+				// so for enum we don't need to know the generic arguments (they have no effect)
+				type = type.GetElementType ();
+				etype = type.etype;
+			}
 
 			switch (etype) {
 			case ElementType.String:

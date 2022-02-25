@@ -94,7 +94,7 @@ namespace Mono.Cecil {
 			if (module.symbol_reader != null && !parameters.KeepSymbolReader)
 				module.symbol_reader.Dispose ();
 
-			var name = module.assembly != null ? module.assembly.Name : null;
+			var name = module.assembly != null && module.kind != ModuleKind.NetModule ? module.assembly.Name : null;
 			var fq_name = stream.value.GetFileName ();
 			var timestamp = parameters.Timestamp ?? module.timestamp;
 			var symbol_writer_provider = parameters.SymbolWriterProvider;
@@ -118,12 +118,15 @@ namespace Mono.Cecil {
 					metadata.SetSymbolWriter (symbol_writer);
 					BuildMetadata (module, metadata);
 
-					if (parameters.DeterministicMvid)
-						metadata.ComputeDeterministicMvid ();
+					if (symbol_writer != null)
+						symbol_writer.Write ();
 
 					var writer = ImageWriter.CreateWriter (module, metadata, stream);
 					stream.value.SetLength (0);
 					writer.WriteImage ();
+
+					if (parameters.DeterministicMvid)
+						ComputeDeterministicMvid (writer, module);
 
 					if (parameters.HasStrongNameKey)
 						CryptoService.StrongName (stream.value, writer, parameters);
@@ -155,6 +158,26 @@ namespace Mono.Cecil {
 				return symbol_writer_provider.GetSymbolWriter (module, parameters.SymbolStream);
 
 			return symbol_writer_provider.GetSymbolWriter (module, fq_name);
+		}
+
+		static void ComputeDeterministicMvid (ImageWriter writer, ModuleDefinition module)
+		{
+			long previousPosition = writer.BaseStream.Position;
+			writer.BaseStream.Seek(0, SeekOrigin.Begin);
+
+			// The hash should be computed with the MVID set to all zeroes
+			// which it is - we explicitly write all zeroes GUID into the heap
+			// as the MVID.
+			// Same goes for strong name signature, which also already in the image but all zeroes right now.
+			Guid guid = CryptoService.ComputeGuid (CryptoService.ComputeHash (writer.BaseStream));
+
+			// The MVID GUID is always the first GUID in the GUID heap
+			writer.MoveToRVA (TextSegment.GuidHeap);
+			writer.WriteBytes (guid.ToByteArray ());
+			writer.Flush ();
+			module.Mvid = guid;
+
+			writer.BaseStream.Seek(previousPosition, SeekOrigin.Begin);
 		}
 	}
 
@@ -1018,7 +1041,7 @@ namespace Mono.Cecil {
 
 			var assembly = module.Assembly;
 
-			if (assembly != null)
+			if (module.kind != ModuleKind.NetModule && assembly != null)
 				BuildAssembly ();
 
 			if (module.HasAssemblyReferences)
@@ -1035,7 +1058,7 @@ namespace Mono.Cecil {
 
 			BuildTypes ();
 
-			if (assembly != null) {
+			if (module.kind != ModuleKind.NetModule && assembly != null) {
 				if (assembly.HasCustomAttributes)
 					AddCustomAttributes (assembly);
 
@@ -1435,7 +1458,8 @@ namespace Mono.Cecil {
 			if (type.HasInterfaces)
 				AddInterfaces (type);
 
-			AddLayoutInfo (type);
+			if (type.HasLayoutInfo)
+				AddLayoutInfo (type);
 
 			if (type.HasFields)
 				AddFields (type);
@@ -1554,36 +1578,12 @@ namespace Mono.Cecil {
 
 		void AddLayoutInfo (TypeDefinition type)
 		{
-			if (type.HasLayoutInfo) {
-				var table = GetTable<ClassLayoutTable> (Table.ClassLayout);
+			var table = GetTable<ClassLayoutTable> (Table.ClassLayout);
 
-				table.AddRow (new ClassLayoutRow (
-					(ushort) type.PackingSize,
-					(uint) type.ClassSize,
-					type.token.RID));
-
-				return;
-			}
-
-			if (type.IsValueType && HasNoInstanceField (type)) {
-				var table = GetTable<ClassLayoutTable> (Table.ClassLayout);
-
-				table.AddRow (new ClassLayoutRow (0, 1, type.token.RID));
-			}
-		}
-
-		static bool HasNoInstanceField (TypeDefinition type)
-		{
-			if (!type.HasFields)
-				return true;
-
-			var fields = type.Fields;
-
-			for (int i = 0; i < fields.Count; i++)
-				if (!fields [i].IsStatic)
-					return false;
-
-			return true;
+			table.AddRow (new ClassLayoutRow (
+				(ushort) type.PackingSize,
+				(uint) type.ClassSize,
+				type.token.RID));
 		}
 
 		void AddNestedTypes (TypeDefinition type)
@@ -1636,8 +1636,21 @@ namespace Mono.Cecil {
 		void AddFieldRVA (FieldDefinition field)
 		{
 			var table = GetTable<FieldRVATable> (Table.FieldRVA);
+
+			// To allow for safe implementation of metadata rewriters for code which uses CreateSpan<T>
+			// if the Field RVA refers to a locally defined type with a pack > 1, align the InitialValue
+			// to pack boundary. This logic is restricted to only being affected by metadata local to the module
+			// as PackingSize is only used when examining a type local to the module being written.
+
+			int align = 1;
+			if (field.FieldType.IsDefinition && !field.FieldType.IsGenericInstance) {
+				var type = field.FieldType.Resolve ();
+
+				if ((type.Module == module) && (type.PackingSize > 1))
+					align = type.PackingSize;
+			}
 			table.AddRow (new FieldRVARow (
-				data.AddData (field.InitialValue),
+				data.AddData (field.InitialValue, align),
 				field.token.RID));
 		}
 
@@ -2445,6 +2458,13 @@ namespace Mono.Cecil {
 		void AddEmbeddedSourceDebugInformation (ICustomDebugInformationProvider provider, EmbeddedSourceDebugInformation embedded_source)
 		{
 			var signature = CreateSignatureWriter ();
+
+			if (!embedded_source.resolved) {
+				signature.WriteBytes (embedded_source.ReadRawEmbeddedSourceDebugInformation ());
+				AddCustomDebugInformation (provider, embedded_source, signature);
+				return;
+			}
+
 			var content = embedded_source.content ?? Empty<byte>.Array;
 			if (embedded_source.compress) {
 				signature.WriteInt32 (content.Length);
@@ -2651,25 +2671,6 @@ namespace Mono.Cecil {
 			signature.WriteSequencePoints (info);
 
 			method_debug_information_table.rows [rid - 1].Col2 = GetBlobIndex (signature);
-		}
-
-		public void ComputeDeterministicMvid ()
-		{
-			var guid = CryptoService.ComputeGuid (CryptoService.ComputeHash (
-				data,
-				resources,
-				string_heap,
-				user_string_heap,
-				blob_heap,
-				table_heap,
-				code));
-
-			var position = guid_heap.position;
-			guid_heap.position = 0;
-			guid_heap.WriteBytes (guid.ToByteArray ());
-			guid_heap.position = position;
-
-			module.Mvid = guid;
 		}
 	}
 
@@ -2988,14 +2989,39 @@ namespace Mono.Cecil {
 				break;
 			case ElementType.None:
 				if (type.IsTypeOf ("System", "Type"))
-					WriteTypeReference ((TypeReference) value);
+					WriteCustomAttributeTypeValue ((TypeReference) value);
 				else
 					WriteCustomAttributeEnumValue (type, value);
+				break;
+			case ElementType.GenericInst:
+				// Generic instantiation can only happen for an enum (no other generic like types can appear in attribute value)
+				WriteCustomAttributeEnumValue (type, value);
 				break;
 			default:
 				WritePrimitiveValue (value);
 				break;
 			}
+		}
+
+		private void WriteCustomAttributeTypeValue (TypeReference value)
+		{
+			var typeDefinition = value as TypeDefinition;
+
+			if (typeDefinition != null) {
+				TypeDefinition outermostDeclaringType = typeDefinition;
+				while (outermostDeclaringType.DeclaringType != null)
+					outermostDeclaringType = outermostDeclaringType.DeclaringType;
+
+				// In CLR .winmd files, custom attribute arguments reference unmangled type names (rather than <CLR>Name)
+				if (WindowsRuntimeProjections.IsClrImplementationType (outermostDeclaringType)) {
+					WindowsRuntimeProjections.Project (outermostDeclaringType);
+					WriteTypeReference (value);
+					WindowsRuntimeProjections.RemoveProjection (outermostDeclaringType);
+					return;
+				}
+			}
+
+			WriteTypeReference (value);
 		}
 
 		void WritePrimitiveValue (object value)
@@ -3076,6 +3102,14 @@ namespace Mono.Cecil {
 					WriteElementType (ElementType.Enum);
 					WriteTypeReference (type);
 				}
+				return;
+			case ElementType.GenericInst:
+				// Generic instantiation can really only happen if it's an enum type since no other
+				// types are allowed in the attribute value.
+				// Enums are special in attribute data, they're encoded as ElementType.Enum followed by a typeref
+				// followed by the value.
+				WriteElementType (ElementType.Enum);
+				WriteTypeReference (type);
 				return;
 			default:
 				WriteElementType (etype);
