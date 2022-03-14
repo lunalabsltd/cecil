@@ -48,6 +48,8 @@ namespace Mono.Cecil.PE {
 
 		ushort sections;
 
+		internal long debug_header_entries_position;
+
 		ImageWriter (ModuleDefinition module, string runtime_version, MetadataBuilder metadata, Disposable<Stream> stream, bool metadataOnly = false)
 			: base (stream.value)
 		{
@@ -64,7 +66,7 @@ namespace Mono.Cecil.PE {
 			this.GetDebugHeader ();
 			this.GetWin32Resources ();
 			this.BuildTextMap ();
-			this.sections = (ushort) (has_reloc ? 2 : 1); // text + reloc?
+			this.sections = (ushort)(has_reloc ? 2 : 1); // text + reloc?
 		}
 
 		void GetDebugHeader ()
@@ -98,7 +100,7 @@ namespace Mono.Cecil.PE {
 
 		public static ImageWriter CreateWriter (ModuleDefinition module, MetadataBuilder metadata, Disposable<Stream> stream)
 		{
-			var writer = new ImageWriter (module, module.runtime_version, metadata, stream);
+			var writer = new ImageWriter (module, module.runtime_version, metadata, stream, metadataOnly: false);
 			writer.BuildSections ();
 			return writer;
 		}
@@ -194,12 +196,18 @@ namespace Mono.Cecil.PE {
 			WriteUInt32 (metadata.timestamp);
 			WriteUInt32 (0);	// PointerToSymbolTable
 			WriteUInt32 (0);	// NumberOfSymbols
-			WriteUInt16 (SizeOfOptionalHeader ());	// SizeOfOptionalHeader
+			WriteUInt16 (SizeOfOptionalHeader ());  // SizeOfOptionalHeader
 
-			// ExecutableImage | (pe64 ? 32BitsMachine : LargeAddressAware)
-			var characteristics = (ushort) (0x0002 | (!pe64 ? 0x0100 : 0x0020));
+			const ushort LargeAddressAware = 0x0020;
+
+			// ExecutableImage | (!pe64 ? 32BitsMachine : LargeAddressAware)
+			var characteristics = (ushort) (0x0002 | (!pe64 ? 0x0100 : LargeAddressAware));
 			if (module.Kind == ModuleKind.Dll || module.Kind == ModuleKind.NetModule)
 				characteristics |= 0x2000;
+
+			if (module.Image != null && (module.Image.Characteristics & LargeAddressAware) != 0)
+				characteristics |= LargeAddressAware;
+
 			WriteUInt16 (characteristics);	// Characteristics
 		}
 
@@ -373,7 +381,7 @@ namespace Mono.Cecil.PE {
 			BaseStream.Seek (GetRVAFileOffset (section, rva), SeekOrigin.Begin);
 		}
 
-		void MoveToRVA (TextSegment segment)
+		internal void MoveToRVA (TextSegment segment)
 		{
 			MoveToRVA (text, text_map.GetRVA (segment));
 		}
@@ -594,7 +602,9 @@ namespace Mono.Cecil.PE {
 
 				data_start += entry.Data.Length;
 			}
-			
+
+			debug_header_entries_position = BaseStream.Position;
+
 			for (var i = 0; i < debug_header.Entries.Length; i++) {
 				var entry = debug_header.Entries [i];
 				WriteBytes (entry.Data);
@@ -688,7 +698,7 @@ namespace Mono.Cecil.PE {
 
 			map.AddMap (TextSegment.Code, metadata.code.length, !pe64 ? 4 : 16);
 			map.AddMap (TextSegment.Resources, metadata.resources.length, 8);
-			map.AddMap (TextSegment.Data, metadata.data.length, 4);
+			map.AddMap (TextSegment.Data, metadata.data.length, metadata.data.BufferAlign);
 			if (metadata.data.length > 0)
 				metadata.table_heap.FixupData (map.GetRVA (TextSegment.Data));
 			map.AddMap (TextSegment.StrongNameSignature, GetStrongNameLength (), 4);
@@ -784,7 +794,7 @@ namespace Mono.Cecil.PE {
 
 		int GetStrongNameLength ()
 		{
-			if (module.Assembly == null)
+			if (module.kind == ModuleKind.NetModule || module.Assembly == null)
 				return 0;
 
 			var public_key = module.Assembly.Name.PublicKey;
